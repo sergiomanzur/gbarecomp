@@ -1930,6 +1930,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     iw);
             }
         }
+        if (const char* ew = std::getenv("GBARECOMP_EWRAM_DUMP")) {
+            std::ofstream dump(ew, std::ios::binary | std::ios::trunc);
+            dump.write(reinterpret_cast<const char*>(bus.ewram_ptr()),
+                       256 * 1024);
+            if (dump) {
+                std::printf("ewram_dump_saved path=\"%s\" bytes=262144\n", ew);
+            } else {
+                std::fprintf(stderr,
+                    "[gbarecomp:runtime] could not write EWRAM dump \"%s\"\n",
+                    ew);
+            }
+        }
     };
 
     auto step_once = [&]() -> bool {
@@ -3165,15 +3177,20 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (args.window) {
         runtime_set_host_service_hook([&]() { win.service_events(); });
     }
-    if (opts.extended_view_frame || opts.io_frame_write) {
+    if (opts.extended_view_frame || opts.io_frame_write || opts.ewram_frame_write) {
         // runtime_set_frame_start_hook is single-slot: fan out to whichever
-        // of the two game-owned frame-start callbacks are actually set,
-        // rather than letting the second registration silently replace the
-        // first.
+        // of the game-owned frame-start callbacks are actually set, rather
+        // than letting a later registration silently replace an earlier one.
         runtime_set_frame_start_hook([&]() {
             if (opts.extended_view_frame) publish_extended_view_frame();
             if (opts.io_frame_write) {
                 opts.io_frame_write(bus.io().raw_mutable(), gba::GbaIo::kIoSize);
+            }
+            if (opts.ewram_frame_write) {
+                // GbaBus::ewram_ptr() backs a fixed 256 KiB array (gba_bus.h);
+                // there is no ewram_size() accessor, so the size is spelled
+                // out here to match it exactly.
+                opts.ewram_frame_write(bus.ewram_ptr(), 256u * 1024u);
             }
         });
         if (opts.extended_view_frame) publish_extended_view_frame();

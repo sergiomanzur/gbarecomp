@@ -107,6 +107,16 @@ struct RunOptions {
     // unaffected.
     void (*io_frame_write)(std::uint8_t* io, std::size_t io_size) = nullptr;
 
+    // Optional game-owned per-frame EWRAM write hook, for cheats/QoL systems
+    // that read and write the game's own save-relevant memory layout (player
+    // HP/MP, inventory, etc.) directly rather than through any game-specific
+    // engine plumbing. Runs at the same frame-start boundary as the two
+    // hooks above. A game providing this is solely responsible for staying
+    // within plausible bounds for whatever it writes -- the engine applies
+    // no gating of its own, and this can affect what gets flushed to the
+    // player's save file. Null leaves every existing game unaffected.
+    void (*ewram_frame_write)(std::uint8_t* ewram, std::size_t ewram_size) = nullptr;
+
     // This cartridge carries a solar sensor. Unlike the RTC there is no ROM
     // signature to detect one from, so it has to be declared. Games that leave
     // this false are unaffected; GBARECOMP_SOLAR still forces it on for
