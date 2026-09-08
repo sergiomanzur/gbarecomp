@@ -3165,9 +3165,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (args.window) {
         runtime_set_host_service_hook([&]() { win.service_events(); });
     }
-    if (opts.extended_view_frame) {
-        runtime_set_frame_start_hook(publish_extended_view_frame);
-        publish_extended_view_frame();
+    if (opts.extended_view_frame || opts.io_frame_write) {
+        // runtime_set_frame_start_hook is single-slot: fan out to whichever
+        // of the two game-owned frame-start callbacks are actually set,
+        // rather than letting the second registration silently replace the
+        // first.
+        runtime_set_frame_start_hook([&]() {
+            if (opts.extended_view_frame) publish_extended_view_frame();
+            if (opts.io_frame_write) {
+                opts.io_frame_write(bus.io().raw_mutable(), gba::GbaIo::kIoSize);
+            }
+        });
+        if (opts.extended_view_frame) publish_extended_view_frame();
     }
 
     // Present-in-place (structural fix for frame-boundary resume dispatch-misses).

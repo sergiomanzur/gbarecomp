@@ -96,6 +96,17 @@ struct RunOptions {
     // established renderer behavior unchanged.
     void (*extended_view_frame)(const ExtendedViewFrameInfo* frame) = nullptr;
 
+    // Optional game-owned per-frame IO register touch-up. Runs at the same
+    // frame-start boundary as extended_view_frame (before scanline 0 of the
+    // next frame composes), with WRITE access to the live IO register page
+    // (io, io_size bytes, based at guest 0x04000000). Unlike extended_view_
+    // frame this can change what the next frame renders, so it exists for
+    // small, well-understood, game-agnostic register nudges only -- e.g.
+    // biasing an active alpha-blend's weights for legibility -- never for
+    // altering game logic or timing. Null leaves every existing game
+    // unaffected.
+    void (*io_frame_write)(std::uint8_t* io, std::size_t io_size) = nullptr;
+
     // This cartridge carries a solar sensor. Unlike the RTC there is no ROM
     // signature to detect one from, so it has to be declared. Games that leave
     // this false are unaffected; GBARECOMP_SOLAR still forces it on for

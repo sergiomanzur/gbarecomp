@@ -174,6 +174,14 @@ public:
     int cosim_dump(char* out, int cap) const;
     void reset_unmapped_count() { unmapped_count_ = 0; }
     const uint8_t* raw() const { return io_.data(); }
+    // Mutable access to the same backing store, for a game-owned per-frame
+    // hook that wants to poke a data-only register (no dispatch side effects
+    // of its own -- see write8()'s switch) directly rather than reimplement
+    // write16(). Bypassing write16()/write8() here skips their side effects
+    // (HALTCNT, IF-acknowledge, audio trigger writes, mmio_cap recording),
+    // so it is only correct for registers verified to have none, such as the
+    // blend registers (BLDCNT/BLDALPHA/BLDY).
+    uint8_t* raw_mutable() { return io_.data(); }
     std::size_t dma_runs(int ch) const { return dma_runs_[ch]; }
     std::size_t dma_words(int ch) const { return dma_words_[ch]; }
     uint32_t debug_dma_next_source(int ch) const {
