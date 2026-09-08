@@ -2684,6 +2684,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     uint64_t last_presented_frame = ppu.frame_count();
 
+
     struct RewindPoint {
         uint64_t frame = 0;
         std::vector<uint8_t> state;
@@ -2709,6 +2710,42 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     bool fast_forward_active = false;
     int fast_forward_multiplier = std::clamp(
         win.fast_forward_multiplier(), 2, 10);
+    // Wall-clock pacing is owed per ELAPSED GUEST FRAME, not per present.
+    // Presentation is opportunistic: a VBlank-start yield is swallowed while
+    // an IRQ handler is on the host stack (runtime_should_yield's
+    // g_irq_nest_depth guard), and a yield deferred past the scanline wrap
+    // makes the following one observe an unchanged ppu.frame_count(). Both
+    // drop a present. Advancing the pacer only on presents therefore let
+    // guest time outrun the wall clock by exactly the dropped fraction —
+    // measured at 1.27x on Aria of Sorrow, and worsening through a session as
+    // more functions heal to native and single dispatches span more frames.
+    // Owing the pacer against g_runtime_vblank_starts (incremented
+    // unconditionally by the PPU) keeps emulated time locked to real time
+    // however coarse presentation gets.
+    uint64_t last_paced_vblank = g_runtime_vblank_starts;
+    uint64_t pace_debt_frames  = 0;
+    // Fast-forward keeps its meaning: one paced frame period per N guest
+    // frames. Normal play divides by one.
+    auto pay_pace_debt = [&]() {
+        const uint64_t vbl = g_runtime_vblank_starts;
+        pace_debt_frames += vbl - last_paced_vblank;
+        last_paced_vblank = vbl;
+        if (!pacer) { pace_debt_frames = 0; return; }
+        const uint64_t divisor = fast_forward_active
+            ? std::max<uint64_t>(1u, fast_forward_multiplier)
+            : 1u;
+        while (pace_debt_frames >= divisor) {
+            pace_debt_frames -= divisor;
+            pacer->wait_for_next_frame();
+        }
+    };
+    // Any non-real-time jump (unpause, save-state load, rewind) realigns the
+    // pacer; debt accrued across that jump is not real time owed.
+    auto pacer_resync = [&]() {
+        if (pacer) pacer->reset();
+        last_paced_vblank = g_runtime_vblank_starts;
+        pace_debt_frames  = 0;
+    };
     auto capture_rewind_point = [&]() {
         if (!rewind_capacity || !assist_tools_enabled()) return;
         const uint64_t frame = ppu.frame_count();
@@ -3028,7 +3065,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             host_paused = !host_paused;
             // Realign the pacer on unpause so it doesn't burn the
             // accumulated wall-clock lag catching up.
-            if (!host_paused && pacer) pacer->reset();
+            if (!host_paused) pacer_resync();
         }
 #if defined(GBARECOMP_RUNTIME_UI)
         // Fold a menu request into the hotkey path so save/load has exactly
@@ -3073,7 +3110,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 last_presented_frame = ppu.frame_count() - 1;
                 // The load jumped guest time; realign the pacer so it
                 // doesn't burn the accumulated lag catching up.
-                if (pacer) pacer->reset();
+                pacer_resync();
                 rewind_history.clear();
                 next_rewind_capture_frame = ppu.frame_count();
             } else {
@@ -3111,7 +3148,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     last_presented_frame = ppu.frame_count() - 1;
                     next_rewind_capture_frame =
                         ppu.frame_count() + rewind_interval;
-                    if (pacer) pacer->reset();
+                    pacer_resync();
                     std::printf("rewind_loaded frame=%llu\n",
                                 static_cast<unsigned long long>(
                                     ppu.frame_count()));
@@ -3198,13 +3235,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     ++frames_presented;
                     if (args.frames >= 0 && frames_presented >= args.frames)
                         host_quit = true;
-                    if (pacer) pacer->wait_for_next_frame();
+                    pay_pace_debt();
                 }
                 if (phase_active) {
                     frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,
                                        fp_t4, FramePhaseRing::now_ns());
                 }
             }
+            // A hook call that presented nothing still consumed guest
+            // frames; settle them so emulated time cannot run ahead.
+            pay_pace_debt();
             return host_quit;
         });
     }
@@ -3587,7 +3627,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     // Normal play presents/paces every frame. Fast-forward
                     // runs N guest frames per one paced host presentation,
                     // making its selected multiplier independent of monitor Hz.
-                    if (pacer) pacer->wait_for_next_frame();
+                    pay_pace_debt();
                 }
                 if (phase_active) {
                     frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,

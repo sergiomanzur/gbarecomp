@@ -29,6 +29,15 @@
 #include <cstdio>
 #include <cstdlib>  // div, abs
 
+// Count of PPU VBlank-start events (scanline 159->160), incremented
+// unconditionally in runtime_tick regardless of DISPSTAT IRQ-enable
+// (runtime_bus_bridge.cpp). IntrWait below waits on this rather than on IF or
+// the BIOS IRQ-flag word at 0x03007FF8: IF is acknowledged by the game's own
+// handler (which runs inside runtime_tick, so a poll can miss the window
+// entirely), and nothing in a cleanroom BIOS image ORs serviced bits into
+// 0x03007FF8. This counter is the one signal that cannot be missed or raced.
+extern "C" unsigned long long g_runtime_vblank_starts;
+
 namespace gba {
 namespace {
 
@@ -455,10 +464,12 @@ void do_midi_key_2_freq() {
 // ── dispatcher ──────────────────────────────────────────────────────────────
 // Returns 1 (serviced in HLE) or 0 (fall through to the recompiled LLE BIOS).
 // The default of any un-cased SWI is 0, so LLE handles everything HLE omits
-// (SoftReset/RegisterRamReset/Halt/Stop/IntrWait/VBlankIntrWait, the sound
-// driver SWIs, MultiBoot, …) — those need the halt/IRQ/reset machinery the
+// (Stop, the sound driver SWIs, MultiBoot, …) — those need machinery the
 // recompiled BIOS already implements exactly, and mGBA's own HLE likewise
-// delegates them.
+// delegates them. Halt, IntrWait, VBlankIntrWait and SoftReset ARE serviced
+// here: a game running against a cleanroom BIOS image has no LLE handler to
+// fall through to (its SWI vector is a bare `movs pc, lr`), so delegating them
+// would silently turn every frame-sync into a no-op.
 int dispatch(uint32_t swi) {
     uint32_t cost = 45;  // nominal SWI overhead for the non-stall cases
     switch (swi) {
@@ -496,6 +507,80 @@ int dispatch(uint32_t swi) {
     case SWI_DIFF_16BIT_UNFILTER:     do_unFilter(2, 2); break;
     case SWI_SOUND_BIAS:       wr16(REG_SOUNDBIAS, static_cast<uint16_t>(R(0) ? 0x200 : 0)); break;
     case SWI_MIDI_KEY_2_FREQ:  do_midi_key_2_freq(); break;
+    case SWI_HALT:
+        while ((rd16(0x04000202) & rd16(0x04000200)) == 0 && rd16(0x04000208)) {
+            runtime_tick(280);
+        }
+        break;
+    case SWI_VBLANK_INTR_WAIT:
+        setR(0, 1);
+        setR(1, 1);
+        [[fallthrough]];
+    case SWI_INTR_WAIT: {
+        uint32_t discardOld = R(0);
+        uint32_t waitMask   = R(1);
+        if (discardOld) {
+            wr16(0x03007FF8, rd16(0x03007FF8) & ~static_cast<uint16_t>(waitMask));
+        }
+        // Advance to the NEXT VBlank, not by one frame's worth of cycles.
+        // Ticking exactly 280896 preserved the raster phase, so the guest
+        // resumed at the scanline it called from and its own per-frame workload
+        // became permanent drift: measured on Aria of Sorrow at +19,945 cycles
+        // (+16.2 scanlines) per frame, which walked every per-frame PPU
+        // register write down the screen and tore fades and raster effects.
+        // Re-phasing here is the whole contract of the call, and it is what
+        // absorbs a variable per-frame workload.
+        //
+        // VBlank (IE/IF bit 0) is the case every game uses and is answered
+        // exactly by the PPU's own VBlank-start counter. Any other mask falls
+        // back to polling IF, which is imprecise but no worse than before.
+        constexpr uint32_t kIrqVBlank = 0x0001u;
+        // Safety net: a mask that can never be satisfied must not spin forever.
+        // Two frames is already longer than any legitimate wait.
+        uint64_t budget = 2ull * 280896ull;
+        if (waitMask & kIrqVBlank) {
+            const unsigned long long start = g_runtime_vblank_starts;
+            while (g_runtime_vblank_starts == start && budget != 0) {
+                runtime_tick(64);
+                budget -= 64;
+            }
+        } else {
+            while ((rd16(0x04000202) & waitMask) == 0 && budget != 0) {
+                runtime_tick(64);
+                budget -= 64;
+            }
+        }
+        wr16(0x03007FF8, rd16(0x03007FF8) | static_cast<uint16_t>(waitMask));
+        break;
+    }
+    case SWI_SOFT_RESET: {
+        cost = 100;
+        setR(13, 0x03007F00u);
+        g_cpu.cpsr = 0x0000001Fu; // System mode
+        uint8_t flag = rd8(0x03007FFAu);
+        g_cpu.R[15] = (flag == 0) ? 0x08000000u : 0x02000000u;
+        break;
+    }
+    case SWI_REGISTER_RAM_RESET: {
+        uint32_t flags = R(0);
+        if (flags & 0x01) { // 256KB EWRAM
+            for (uint32_t a = 0x02000000u; a < 0x02040000u; a += 4) wr32(a, 0);
+        }
+        if (flags & 0x02) { // IWRAM except top 0x200 bytes
+            for (uint32_t a = 0x03000000u; a < 0x03007E00u; a += 4) wr32(a, 0);
+        }
+        if (flags & 0x04) { // PALRAM
+            for (uint32_t a = 0x05000000u; a < 0x05000400u; a += 4) wr32(a, 0);
+        }
+        if (flags & 0x08) { // VRAM
+            for (uint32_t a = 0x06000000u; a < 0x06018000u; a += 4) wr32(a, 0);
+        }
+        if (flags & 0x10) { // OAM
+            for (uint32_t a = 0x07000000u; a < 0x07000400u; a += 4) wr32(a, 0);
+        }
+        cost = 100;
+        break;
+    }
     default:
         return 0;  // fall through to the recompiled LLE BIOS
     }
