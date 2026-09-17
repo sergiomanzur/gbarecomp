@@ -53,6 +53,13 @@ typedef struct {
                              * A boot pre-roll hides the cold-start hitch for free   *
                              * (latency before gameplay is irrelevant); the servo    *
                              * drains the excess down to target over time.           */
+    double trim_after_ms;   /* how long after priming to wait before dropping a     *
+                             * leftover pre-roll surplus in one step (default 2000). *
+                             * The +/-0.5%-clamped servo alone takes tens of         *
+                             * seconds to drain a large preroll_ms/target_ms gap,    *
+                             * which is heard as audio running fast; this performs   *
+                             * the one-time correction once the boot cushion has     *
+                             * served its purpose.                                   */
     int    stretch_enable;  /* 1 = conceal underruns by pitch-preserving loop of the *
                              * most recent audio instead of fading to silence (1)    */
     double stretch_min_ms;  /* min loop period / correlation search floor (5)        */
@@ -68,6 +75,8 @@ typedef struct {
     uint64_t overflow_drops;    /* source frames dropped on ring overflow     */
     uint64_t stretch_frames;    /* output frames synthesized by stall conceal */
     uint64_t stretch_events;    /* distinct stall episodes concealed          */
+    uint64_t trim_events;       /* one-shot preroll-surplus trims performed   */
+    uint64_t trimmed_frames;    /* source frames discarded by those trims     */
     double   last_fill_ms;
     double   last_correction;   /* applied ratio correction (signed)          */
 } rab_stats;
@@ -93,6 +102,13 @@ typedef struct rab_bridge {
     int    primed;          /* set once fill first reaches prime_ms            */
     double prime_ms;        /* fill needed to prime (preroll_ms or target_ms)  */
     float  last_out[2];     /* last emitted sample per channel (for holds)     */
+
+    /* one-shot preroll-surplus trim: host time is accumulated from pull block *
+     * sizes / host_rate (never wall-clock -- rab_pull runs on the audio       *
+     * callback thread), scoped to this bridge instance's lifetime and reset  *
+     * by the memset() in rab_init() below.                                   */
+    double elapsed_since_prime_ms; /* host ms pulled since b->primed went true */
+    int    trimmed;                /* set once the one-shot trim has run       */
 
     /* stall concealment (pitch-preserving loop of recent audio on starvation) */
     int    concealing;      /* currently looping to conceal a producer stall   */
@@ -168,6 +184,7 @@ void rab_config_defaults(rab_config *c) {
     c->em_low_ms      = 12.0;
     c->em_high_ms     = 105.0;
     c->preroll_ms       = 0.0;    /* 0 => prime at target_ms (no extra boot cushion) */
+    c->trim_after_ms    = 2000.0; /* wait this long post-prime before the one-shot trim */
     c->stretch_enable   = 1;
     c->stretch_min_ms   = 5.0;
     c->stretch_max_ms   = 25.0;
@@ -360,6 +377,50 @@ static double rab__find_loop_len(const rab_bridge *b, int64_t end_i) {
 void rab_pull(rab_bridge *b, int16_t *out, int frames) {
     int ch = b->cfg.channels;
     rab__update_controller(b);
+
+    /* One-shot preroll-surplus trim: preroll_ms primes the ring well above
+     * target_ms on purpose (a boot cushion against the cold-start warm-up
+     * hitch), and the +/-max_correction servo alone would take tens of
+     * seconds to drain a large gap -- audible the whole time as audio
+     * running fast. Once primed and trim_after_ms of host time has elapsed
+     * (the cushion has done its job), drop the surplus in a single step
+     * instead of waiting on the servo. Host time is accumulated here from
+     * this callback's own block size / host_rate rather than sampled from a
+     * wall clock, because rab_pull runs on the audio callback thread and
+     * must not call time-of-day functions or allocate. Guarded by `trimmed`
+     * so this can run at most once per bridge lifetime (reset by rab_init's
+     * memset) and can never fight the servo by re-triggering. */
+    if (b->primed && !b->trimmed) {
+        b->elapsed_since_prime_ms += (double)frames * 1000.0 / b->cfg.host_rate;
+        if (b->elapsed_since_prime_ms >= b->cfg.trim_after_ms) {
+            b->trimmed = 1;
+            double fill_ms = rab_fill_ms(b);
+            if (fill_ms > b->cfg.target_ms + 20.0) {
+                double target_fill_frames = b->cfg.target_ms * b->cfg.source_rate / 1000.0;
+                double cur_fill_frames    = (double)b->in_count - b->out_pos;
+                double drop_frames        = cur_fill_frames - target_fill_frames;
+                if (drop_frames > 0.0) {
+                    b->out_pos += drop_frames;
+                    b->gain = 0.0; /* mask the cursor jump; the existing fade ramp
+                                     * conceals it exactly like the underrun path. */
+                    /* Anti-windup: err_lp/corr were converging toward the fill
+                     * that just vanished (likely still saturated near
+                     * +max_correction from fighting the surplus). Left alone,
+                     * that stale correction keeps consuming samples too fast
+                     * post-trim, driving fill/corr below target until the
+                     * low-pass decays on its own -- the overshoot goes away
+                     * instantly once the controller starts from a clean fill
+                     * error instead. This resets per-instance runtime state,
+                     * not the static config constants the brief said not to
+                     * touch (target_ms/preroll_ms/max_correction/slew_pp_per_s). */
+                    b->err_lp = 0.0;
+                    b->corr   = 0.0;
+                    b->stats.trim_events++;
+                    b->stats.trimmed_frames += (uint64_t)(drop_frames + 0.5);
+                }
+            }
+        }
+    }
 
     double gstep = 1.0 / (b->cfg.host_rate * 0.003); /* ~3ms fade in/out */
     double step  = b->cur_step;

@@ -65,6 +65,10 @@ enum HostHotkey {
     HK_WINDOW_BIGGER, HK_WINDOW_SMALLER,
     HK_VOLUME_UP, HK_VOLUME_DOWN, HK_DISPLAY_PERF,
     HK_SOLAR_BRIGHTER, HK_SOLAR_DIMMER, HK_SOLAR_LIVE,
+    // Host-side dialogue-advance auto-tap (see HK_SKIP_DIALOGUE handling in
+    // pump()). No guest memory write, no engine hook -- purely a synthesized
+    // A-button tap on top of whatever the real input state already is.
+    HK_SKIP_DIALOGUE,
     HK_COUNT
 };
 
@@ -381,6 +385,12 @@ struct Backend {
     int          assist_fast_forward_multiplier = 4;
     bool         assist_rewind_was_down = false;
     Uint32       assist_rewind_repeat_at = 0;
+    // HK_SKIP_DIALOGUE cadence: counts pumps while the hotkey is held, so the
+    // synthesized A tap alternates press/release instead of one continuous
+    // hold (which would only advance the first message box). Reset to 0 on
+    // release so every fresh hold starts on a press edge. Per-window state,
+    // so it lives here rather than as a function-local static in pump().
+    int          skip_dialogue_tap_counter = 0;
     int          scale = 3;             // current integer window scale
     int          fullscreen = 0;        // 0 windowed, 1 borderless, 2 exclusive
     int          volume = 100;          // 0..100 gain on pushed samples
@@ -761,12 +771,14 @@ const char* const kHotkeyNames[HK_COUNT] = {
     "WindowBigger", "WindowSmaller",
     "VolumeUp", "VolumeDown", "DisplayPerf",
     "SolarBrighter", "SolarDimmer", "SolarLive",
+    "SkipDialogue",
 };
 const char* const kHotkeyDefaults[HK_COUNT] = {
     "Alt+Return", "Shift+P", "Tab",
     "", "",
     "", "", "F",
     "", "", "",
+    "Q",
 };
 
 // SDL_GetScancodeFromName plus the same lowercase aliases recomp-ui's
@@ -1455,12 +1467,15 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
             std::fprintf(stderr,
                 "[gba-audio-probe] pushes=%llu audio=%.1fs bridge_underrun=%llu(%.2f/s) "
                 "stretch=%.0fms(ev=%llu) overflow_drops=%llu fill_ms=%.1f corr=%+.3f%% "
+                "trim_events=%llu trimmed_frames=%llu "
                 "gt_compile=%.1fms(+%.1fms)\n",
                 s_pushes, secs, (unsigned long long)st.underrun_events,
                 secs > 0 ? st.underrun_events / secs : 0.0,
                 stretch_ms, (unsigned long long)st.stretch_events,
                 (unsigned long long)st.overflow_drops, rab_fill_ms(&b->bridge),
-                st.last_correction * 100.0, gt_ms, gt_dms);
+                st.last_correction * 100.0,
+                (unsigned long long)st.trim_events, (unsigned long long)st.trimmed_frames,
+                gt_ms, gt_dms);
             std::fflush(stderr);
         }
     }
@@ -1514,6 +1529,25 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
     b->base_w = base_w;
     b->base_h = base_h;
     b->expanded_view = base_w != 240 || base_h != 160;
+
+    // present() picks its copy path from expanded_view/resize_driven_view, and
+    // the two paths need opposite renderer configurations: the native path
+    // relies on a logical size for SDL's own aspect-correct centering, while
+    // the expanded paths compute an explicit destination rect and therefore
+    // need logical scaling OFF (a rect in window pixels would otherwise be
+    // reinterpreted in 240x160 logical space and land off-screen). open() sets
+    // this up once, but a live view switch lands here instead, so keep the two
+    // in sync or the mode we switch INTO renders through the other mode's
+    // assumptions -- which showed up as a stretched native view after
+    // switching down from 16:9, and a blank window switching back up.
+#if !defined(__ANDROID__)
+    if (b->expanded_view || b->resize_driven_view) {
+        SDL_RenderSetLogicalSize(b->renderer, 0, 0);
+        SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
+    } else {
+        SDL_RenderSetLogicalSize(b->renderer, base_w, base_h);
+    }
+#endif
     if (b->color_lut && !b->color_lut->is_passthrough())
         b->graded_fb.resize(static_cast<std::size_t>(base_w) * base_h * 3u);
     return true;
@@ -1595,6 +1629,9 @@ void HostWindow::present(const uint8_t* rgb888) {
     SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
 #else
     if (!b->expanded_view && !b->resize_driven_view) {
+        // The renderer carries a 240x160 logical size in this mode (see open()
+        // and set_surface_size()), so SDL scales and centers this copy itself,
+        // aspect-correct, at whatever size the window currently is.
         SDL_RenderCopy(b->renderer, b->texture, nullptr, nullptr);
     } else {
         int drawable_w = 0;
@@ -1612,6 +1649,25 @@ void HostWindow::present(const uint8_t* rgb888) {
         }
         const PresentationLayout layout = compute_presentation_layout(
             drawable_w, drawable_h, b->base_w, b->base_h);
+        if (const char* dbg = std::getenv("GBARECOMP_WS_DEBUG")) {
+            static Uint32 s_last_log = 0;
+            const Uint32 now = SDL_GetTicks();
+            if (*dbg && *dbg != '0' && now - s_last_log > 1000) {
+                s_last_log = now;
+                int win_w = 0, win_h = 0, ro_w = 0, ro_h = 0;
+                SDL_GetWindowSize(b->window, &win_w, &win_h);
+                SDL_GetRendererOutputSize(b->renderer, &ro_w, &ro_h);
+                std::fprintf(stderr,
+                    "[ws-debug] base=%dx%d resize_driven=%d expanded=%d "
+                    "win_size=%dx%d renderer_out=%dx%d used_drawable=%dx%d "
+                    "layout=x%d,y%d,%dx%d int_scale=%d\n",
+                    b->base_w, b->base_h, b->resize_driven_view,
+                    b->expanded_view, win_w, win_h, ro_w, ro_h,
+                    drawable_w, drawable_h, layout.x, layout.y,
+                    layout.width, layout.height, layout.integer_scale);
+                std::fflush(stderr);
+            }
+        }
         if (layout.width > 0 && layout.height > 0) {
             const SDL_Rect destination = {
                 layout.x, layout.y, layout.width, layout.height};
@@ -1845,6 +1901,15 @@ void HostWindow::set_resize_driven_view(bool enabled) {
         b->window,
         enabled || b->expanded_view || b->freely_resizable_window
             ? SDL_TRUE : SDL_FALSE);
+    // Same present()-path/renderer-configuration pairing as set_surface_size().
+#if !defined(__ANDROID__)
+    if (b->expanded_view || b->resize_driven_view) {
+        SDL_RenderSetLogicalSize(b->renderer, 0, 0);
+        SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
+    } else {
+        SDL_RenderSetLogicalSize(b->renderer, b->base_w, b->base_h);
+    }
+#endif
 }
 
 #if defined(GBARECOMP_RUNTIME_UI)
@@ -1989,6 +2054,7 @@ HostWindow::Events HostWindow::pump() {
                         case HK_SOLAR_BRIGHTER: ev.solar_brighter = true;    break;
                         case HK_SOLAR_DIMMER:   ev.solar_dimmer = true;      break;
                         case HK_SOLAR_LIVE:     ev.solar_live = true;        break;
+                        case HK_SKIP_DIALOGUE:  /* level-triggered below */  break;
                     }
                 }
             }
@@ -2029,6 +2095,35 @@ HostWindow::Events HostWindow::pump() {
         SDL_Scancode sc = b->bind_sc[bit];
         if (sc != SDL_SCANCODE_UNKNOWN && ks[sc])
             keys &= static_cast<uint16_t>(~(1u << bit));
+    }
+
+    // SkipDialogue (default Q) is level-triggered like Turbo, but instead of
+    // just flagging a mode it synthesizes repeated A-button press *edges*
+    // into KEYINPUT: a continuously held A does not advance successive
+    // message boxes, so while the hotkey is held we alternate the A bit
+    // (bit 0, active-low) pressed for kSkipDialogueTapHalfPeriod pumps, then
+    // released for the same span (~15 taps/second at 60 pumps/second). This
+    // only ever ADDs a press on top of whatever the real A binding already
+    // produced above -- it never clears back to released, so a genuine
+    // player hold of A is never interrupted. No guest memory is touched.
+    {
+        const HotkeyBind& hb = b->hotkeys[HK_SKIP_DIALOGUE];
+        bool held = false;
+        if (hb.key != SDLK_UNKNOWN) {
+            SDL_Scancode sc = SDL_GetScancodeFromKey(hb.key);
+            held = sc != SDL_SCANCODE_UNKNOWN && ks[sc] &&
+                   hotkey_mods_ok(hb, SDL_GetModState());
+        }
+        if (held) {
+            constexpr int kSkipDialogueTapHalfPeriod = 2;  // pumps per phase
+            const int phase = b->skip_dialogue_tap_counter %
+                               (kSkipDialogueTapHalfPeriod * 2);
+            if (phase < kSkipDialogueTapHalfPeriod)
+                keys &= static_cast<uint16_t>(~(1u << 0));  // A bit, active-low
+            ++b->skip_dialogue_tap_counter;
+        } else {
+            b->skip_dialogue_tap_counter = 0;
+        }
     }
 
     // SDL's standard controller vocabulary maps naturally to the ten GBA
