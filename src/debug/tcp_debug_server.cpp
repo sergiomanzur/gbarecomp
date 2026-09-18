@@ -1015,6 +1015,11 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
                             ctx.bus->pal_ptr());
             rgb = live.data();
         }
+        if (ctx.post_process) {
+            ctx.post_process(const_cast<uint8_t*>(rgb),
+                             static_cast<int>(ctx.ppu->render_width()),
+                             static_cast<int>(ctx.ppu->render_height()));
+        }
         // Dimensions track the active view (240x160 faithful, wider when
         // view-area expansion is on) so oracle tooling sees the real frame.
         out = "{\"ok\":true,\"w\":" + std::to_string(ctx.ppu->render_width()) +

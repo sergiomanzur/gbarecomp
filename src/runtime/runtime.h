@@ -144,6 +144,9 @@ struct RunOptions {
     // loadout notifications, soul counters) rendered on top of the game view.
     void (*imgui_overlay_render)() = nullptr;
 
+    // Optional game-owned framebuffer post-process hook (e.g. HD sprite composition)
+    void (*framebuffer_post_process)(std::uint8_t* rgb, int width, int height) = nullptr;
+
     // Optional game-owned TCP debug command handler.
     bool (*custom_tcp_cmd)(std::string_view req, std::string& out) = nullptr;
 

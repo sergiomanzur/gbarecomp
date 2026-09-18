@@ -91,6 +91,8 @@ public:
         std::function<std::string()> run_status;   // JSON: run-state/parked/pc
         using CustomCmdFn = std::function<bool(std::string_view, std::string&)>;
         CustomCmdFn custom_cmd;
+        using PostProcessFn = std::function<void(uint8_t*, int, int)>;
+        PostProcessFn post_process;
     };
 
     TcpDebugServer();

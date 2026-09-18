@@ -2194,6 +2194,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     if (opts.ewram_frame_write) {
                         opts.ewram_frame_write(bus.ewram_ptr(), 256u * 1024u);
                     }
+                    if (opts.framebuffer_post_process && ppu.has_latched_framebuffer()) {
+                        opts.framebuffer_post_process(
+                            const_cast<uint8_t*>(ppu.latched_framebuffer()),
+                            static_cast<int>(ppu.render_width()),
+                            static_cast<int>(ppu.render_height()));
+                    }
                 }
                 std::lock_guard<std::mutex> lk(ctl_m);
                 if (st == RS_STEP) {
@@ -2267,6 +2273,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         };
         ctx.pause = [&]() { park_and_wait(2000); };
         ctx.custom_cmd = opts.custom_tcp_cmd;
+        ctx.post_process = opts.framebuffer_post_process;
         ctx.run_status = [&]() -> std::string {
             int st; bool pk;
             { std::lock_guard<std::mutex> lk(ctl_m); st = ctl_state; pk = ctl_parked; }
