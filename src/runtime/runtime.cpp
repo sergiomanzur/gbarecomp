@@ -2120,6 +2120,34 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fflush(wram_trace_log);
     };
 
+    auto publish_extended_view_frame = [&]() {
+        if (!opts.extended_view_frame) return;
+        ExtendedViewFrameInfo info{};
+        info.frame_count = ppu.frame_count();
+        info.view_width = ppu.render_width();
+        info.extra_left = ppu.view_extra_left();
+        info.extra_right = ppu.view_extra_right();
+        info.io = bus.io().raw();
+        info.io_size = gba::GbaIo::kIoSize;
+        opts.extended_view_frame(&info);
+    };
+
+    if (opts.extended_view_frame || opts.io_frame_write || opts.ewram_frame_write) {
+        runtime_set_frame_start_hook([&]() {
+            if (opts.extended_view_frame) publish_extended_view_frame();
+            if (opts.io_frame_write) {
+                opts.io_frame_write(bus.io().raw_mutable(), gba::GbaIo::kIoSize);
+            }
+            if (opts.ewram_frame_write) {
+                opts.ewram_frame_write(bus.ewram_ptr(), 256u * 1024u);
+            }
+        });
+        if (opts.extended_view_frame) publish_extended_view_frame();
+        if (opts.ewram_frame_write) {
+            opts.ewram_frame_write(bus.ewram_ptr(), 256u * 1024u);
+        }
+    }
+
     if (args.tcp_port > 0) {
         // ── Free-run threading model ───────────────────────────────────────
         // The game CORE runs on a dedicated thread; the TCP server runs on THIS
@@ -2161,7 +2189,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 // observation regardless. set_keyinput writes bus.io directly and
                 // persists, so input set before `continue` holds across frames.
                 bool ok = step_frame();
-                if (ok) wram_trace_tick();
+                if (ok) {
+                    wram_trace_tick();
+                    if (opts.ewram_frame_write) {
+                        opts.ewram_frame_write(bus.ewram_ptr(), 256u * 1024u);
+                    }
+                }
                 std::lock_guard<std::mutex> lk(ctl_m);
                 if (st == RS_STEP) {
                     ctl_step_ok   = ok;
@@ -2233,6 +2266,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             ctl_cv.notify_all();
         };
         ctx.pause = [&]() { park_and_wait(2000); };
+        ctx.custom_cmd = opts.custom_tcp_cmd;
         ctx.run_status = [&]() -> std::string {
             int st; bool pk;
             { std::lock_guard<std::mutex> lk(ctl_m); st = ctl_state; pk = ctl_parked; }
@@ -2384,17 +2418,6 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
     FramePhaseRing frame_phase;
-    auto publish_extended_view_frame = [&]() {
-        if (!opts.extended_view_frame) return;
-        ExtendedViewFrameInfo info{};
-        info.frame_count = ppu.frame_count();
-        info.view_width = ppu.render_width();
-        info.extra_left = ppu.view_extra_left();
-        info.extra_right = ppu.view_extra_right();
-        info.io = bus.io().raw();
-        info.io_size = gba::GbaIo::kIoSize;
-        opts.extended_view_frame(&info);
-    };
     auto apply_runtime_view_width = [&](std::uint32_t target) -> bool {
         const ViewGeometry geometry = resolve_view_geometry(
             static_cast<int>(target),

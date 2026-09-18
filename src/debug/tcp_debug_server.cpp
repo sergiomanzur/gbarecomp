@@ -624,6 +624,10 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         return req.find(tok) != std::string_view::npos;
     };
 
+    if (ctx.custom_cmd && ctx.custom_cmd(req, out)) {
+        return;
+    }
+
     if (contains("\"ping\"") || req == "ping") {
         out = "{\"ok\":true,\"who\":\"gbarecomp_native\"}";
         return;
@@ -799,6 +803,35 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
     if (contains("\"read_ewram\"")) {
         if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
         cmd_read_region(ctx.bus->ewram_ptr(), 256 * 1024, req, out, 0x02000000u);
+        return;
+    }
+    if (contains("\"write_ewram\"")) {
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        uint64_t addr = 0;
+        if (!extract_uint(req, "\"addr\"", addr)) {
+            emit_error(out, "missing addr");
+            return;
+        }
+        if (addr < 0x02000000u || addr >= 0x02040000u) {
+            emit_error(out, "addr out of bounds");
+            return;
+        }
+        std::string hexData;
+        if (!extract_string(req, "\"data\"", hexData)) {
+            emit_error(out, "missing data");
+            return;
+        }
+        size_t off = static_cast<size_t>(addr - 0x02000000u);
+        uint8_t* dst = ctx.bus->ewram_ptr() + off;
+        size_t maxLen = 256 * 1024 - off;
+        size_t nbytes = hexData.size() / 2;
+        if (nbytes > maxLen) nbytes = maxLen;
+        for (size_t i = 0; i < nbytes; ++i) {
+            unsigned int byteVal = 0;
+            std::sscanf(hexData.c_str() + i * 2, "%02x", &byteVal);
+            dst[i] = static_cast<uint8_t>(byteVal);
+        }
+        out = "{\"ok\":true}";
         return;
     }
     if (contains("\"read_io\"")) {

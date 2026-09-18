@@ -89,6 +89,8 @@ public:
         std::function<void()>        resume;       // free-run (continue)
         std::function<void()>        pause;        // park at frame boundary
         std::function<std::string()> run_status;   // JSON: run-state/parked/pc
+        using CustomCmdFn = std::function<bool(std::string_view, std::string&)>;
+        CustomCmdFn custom_cmd;
     };
 
     TcpDebugServer();

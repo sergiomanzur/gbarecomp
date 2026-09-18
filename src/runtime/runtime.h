@@ -9,6 +9,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace gbarecomp {
 
@@ -141,6 +143,9 @@ struct RunOptions {
     // Optional game-owned ImGui overlay callback, for HUD overlays (e.g. mini-map,
     // loadout notifications, soul counters) rendered on top of the game view.
     void (*imgui_overlay_render)() = nullptr;
+
+    // Optional game-owned TCP debug command handler.
+    bool (*custom_tcp_cmd)(std::string_view req, std::string& out) = nullptr;
 
     // ---- game-owned items appended to the in-game settings menu -------------
     // The runtime builds the common surface (display, audio, save states) from
