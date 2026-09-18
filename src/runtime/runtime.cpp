@@ -3176,6 +3176,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     if (args.window) {
         runtime_set_host_service_hook([&]() { win.service_events(); });
+#if defined(GBARECOMP_RUNTIME_UI)
+        if (opts.imgui_overlay_render) {
+            HostWindow::set_imgui_overlay_render(opts.imgui_overlay_render);
+        }
+#endif
     }
     if (opts.extended_view_frame || opts.io_frame_write || opts.ewram_frame_write) {
         // runtime_set_frame_start_hook is single-slot: fan out to whichever

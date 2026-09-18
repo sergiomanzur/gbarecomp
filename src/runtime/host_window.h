@@ -91,6 +91,7 @@ public:
     // Attach the capability-only shared model. HostWindow presents it through
     // Dear ImGui's SDL_Renderer2 backend over the existing game renderer.
     void set_runtime_ui(RecompRuntimeUi* ui);
+    static void set_imgui_overlay_render(void (*fn)());
 #endif
     void set_fps_readout(bool on);      // presents-per-second in the title bar
     bool fps_readout() const;

@@ -948,9 +948,12 @@ void runtime_imgui_shutdown(Backend* b) {
     b->runtime_imgui_ready = false;
 }
 
+static void (*g_imgui_overlay_render)() = nullptr;
+
 void runtime_imgui_render(Backend* b) {
-    if (!b->runtime_imgui_ready || !b->runtime_ui ||
-        !recomp_runtime_ui_is_open(b->runtime_ui)) {
+    const bool ui_open = b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui);
+    const bool has_overlay = (g_imgui_overlay_render != nullptr);
+    if (!b->runtime_imgui_ready || (!ui_open && !has_overlay)) {
         return;
     }
     ImGui::SetCurrentContext(b->runtime_imgui_context);
@@ -969,7 +972,12 @@ void runtime_imgui_render(Backend* b) {
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
-    recomp_runtime_ui_render_imgui(b->runtime_ui);
+    if (g_imgui_overlay_render) {
+        g_imgui_overlay_render();
+    }
+    if (ui_open) {
+        recomp_runtime_ui_render_imgui(b->runtime_ui);
+    }
     ImGui::Render();
     ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), b->renderer);
 
@@ -1038,6 +1046,10 @@ bool runtime_ui_event(RecompRuntimeUi* ui, const SDL_Event& e) {
 #endif
 
 }  // namespace
+
+void HostWindow::set_imgui_overlay_render(void (*fn)()) {
+    g_imgui_overlay_render = fn;
+}
 
 HostWindow::HostWindow() = default;
 
